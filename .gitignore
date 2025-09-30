@@ -1,0 +1,28 @@
+.env
+
+# Dependências
+node_modules/
+vendor/
+
+# Build / dist
+dist/
+build/
+out/
+*.log
+
+# Arquivos de ambiente
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# IDEs / Editores
+.vscode/
+.idea/
+*.swp
+*.swo
