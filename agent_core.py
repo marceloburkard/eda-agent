@@ -242,6 +242,10 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
         info = basic_overview(df)
         result["answer"] = f"{info['rows']} linhas, {info['cols']} colunas.\nTipos inferidos por coluna disponíveis na tabela."
         result["tables"]["types"] = pd.DataFrame(info["types"].items(), columns=["coluna","tipo"])
+        # Refinar com LLM
+        llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+        if llm_extra:
+            result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
         return result
 
     if any(k in q for k in ["distribuição", "histograma", "histogram", "distribution"]):
@@ -258,6 +262,9 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             fig = plot_hist(df, target)
             result["answer"] = f"Histograma de {target}."
             result["fig"] = fig
+            llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+            if llm_extra:
+                result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
             return result
 
     if "correla" in q:
@@ -266,6 +273,9 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             result["answer"] = "Matriz de correlação entre variáveis numéricas."
             result["tables"]["correlation"] = corr
             result["fig"] = fig
+            llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+            if llm_extra:
+                result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
             return result
 
     if any(k in q for k in ["outlier", "atípico", "anomalia", "anomaly"]):
@@ -278,6 +288,9 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             # add isolation forest summary
             anomalies = anomalies_isolation_forest(df)
             result["tables"]["anomalies_iforest"] = pd.DataFrame({"is_anomaly": anomalies}).reset_index().rename(columns={"index":"row_index"})
+            llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+            if llm_extra:
+                result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
             return result
 
     if any(k in q for k in ["cluster", "agrupamento"]):
@@ -286,12 +299,18 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             result["answer"] = "KMeans (k=3) sobre PCA 2D."
             result["tables"]["clusters"] = tbl
             result["fig"] = fig
+            llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+            if llm_extra:
+                result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
             return result
 
     if any(k in q for k in ["média", "mediana", "variância", "desvio", "summary", "describe", "estatíst"]):
         desc = summary_stats(df)
         result["answer"] = "Estatísticas descritivas."
         result["tables"]["summary"] = desc
+        llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+        if llm_extra:
+            result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
         return result
 
     if any(k in q for k in ["tempo", "temporal", "time trend"]):
@@ -321,6 +340,9 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             series.plot(kind="line")
             plt.title("Tendência temporal (buckets)")
             result["fig"] = fig
+            llm_extra = refine_answer_with_llm(question, result["answer"], df, mem)
+            if llm_extra:
+                result["answer"] += f"\n\nConclusões (LLM):\n{llm_extra}"
             return result
 
     # fallback - usar OpenAI ChatGPT
@@ -448,3 +470,49 @@ RESPOSTA:
             "tables": {"summary": desc},
             "fig": None
         }
+
+
+def refine_answer_with_llm(question: str, app_answer: str, df: pd.DataFrame, mem: Memory) -> Optional[str]:
+    """
+    Envia a pergunta original e a resposta gerada pela aplicação para a LLM (gpt-3.5-turbo)
+    e retorna conclusões próprias da LLM para complementar a resposta.
+    """
+    try:
+        load_dotenv()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None
+
+        client = openai.OpenAI(api_key=api_key)
+
+        # Pequeno contexto do dataset
+        info = basic_overview(df)
+        types_preview = info.get("types", {})
+        columns_preview = info.get("columns", [])[:30]
+
+        memory_snippet = "\n".join(f"- {fact}" for fact in mem.facts[:10]) if mem and mem.facts else "(vazio)"
+
+        prompt = (
+            "Considere a pergunta do usuário e a resposta técnica gerada pela aplicação.\n"
+            "Produza suas PRÓPRIAS conclusões objetivas em até 8 linhas, destacando insights acionáveis,\n"
+            "limitações e próximos passos. Não repita o texto original; complemente-o.\n\n"
+            f"Pergunta do usuário: {question}\n\n"
+            f"Resposta da aplicação:\n{app_answer}\n\n"
+            f"Colunas (amostra): {columns_preview}\n"
+            f"Tipos inferidos (resumo): {types_preview}\n"
+            f"Fatos de memória (se houver):\n{memory_snippet}\n\n"
+            "Devolva SOMENTE o texto das suas conclusões, sem preâmbulos."
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um analista sênior de dados; seja conciso e pragmático."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=400,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return None
