@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
+import openai
+from dotenv import load_dotenv
 
 MEMORY_FILE = "memory.json"
 
@@ -219,13 +221,128 @@ def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, A
             result["fig"] = fig
             return result
 
-    # fallback
-    desc = summary_stats(df)
-    result["answer"] = "Pergunta não mapeada. Mostrando resumo estatístico."
-    result["tables"]["summary"] = desc
-    return result
+    # fallback - usar OpenAI ChatGPT
+    return call_openai_chatgpt(question, df, mem)
 
 def add_conclusion(mem: Memory, text: str) -> None:
     if text and text not in mem.facts:
         mem.facts.append(text)
         mem.save()
+
+def call_openai_chatgpt(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, Any]:
+    """
+    Chama a API da OpenAI ChatGPT para responder perguntas não mapeadas
+    """
+    try:
+        # Carregar variáveis do arquivo .env
+        load_dotenv()
+        
+        # Configurar a API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {
+                "answer": "Erro: OPENAI_API_KEY não configurada. Configure a variável no arquivo .env.",
+                "tables": {},
+                "fig": None
+            }
+        
+        client = openai.OpenAI(api_key=api_key)
+        
+        # Preparar informações do dataset
+        basic_info = basic_overview(df)
+        summary_stats_df = summary_stats(df)
+        
+        # Preparar fatos da memória para incluir no prompt
+        memory_context = ""
+        if mem.facts:
+            memory_context = f"""
+FATOS E CONCLUSÕES ANTERIORES SALVAS NA MEMÓRIA:
+{chr(10).join(f"- {fact}" for fact in mem.facts)}
+
+"""
+        
+        # Criar prompt estruturado
+        prompt = f"""
+Você é um assistente especializado em análise de dados. Analise o seguinte dataset e responda à pergunta do usuário.
+
+{memory_context}INFORMAÇÕES DO DATASET:
+- Número de linhas: {basic_info['rows']}
+- Número de colunas: {basic_info['cols']}
+- Colunas: {', '.join(basic_info['columns'])}
+- Tipos de dados: {basic_info['types']}
+- Valores faltantes por coluna: {basic_info['missing_by_col']}
+
+ESTATÍSTICAS DESCRITIVAS:
+{summary_stats_df.to_string()}
+
+PERGUNTA DO USUÁRIO: {question}
+
+INSTRUÇÕES:
+1. Analise os dados fornecidos e responda à pergunta de forma clara e objetiva
+2. Considere os fatos e conclusões anteriores da memória ao formular sua resposta
+3. Se possível, sugira análises adicionais que poderiam ser úteis
+4. Identifique padrões, tendências ou insights interessantes nos dados
+5. Se a pergunta não puder ser respondida com os dados disponíveis, explique o porquê
+6. Responda em português brasileiro
+
+RESPOSTA:
+"""
+        
+        # Chamar a API
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um especialista em análise de dados e estatística."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        
+        answer = response.choices[0].message.content
+        
+        # Tentar gerar visualizações baseadas na resposta
+        result = {
+            "answer": answer,
+            "tables": {"summary": summary_stats_df},
+            "fig": None
+        }
+        
+        # Se a pergunta menciona distribuição ou histograma, tentar gerar
+        if any(word in question.lower() for word in ["distribuição", "histograma", "histogram", "distribution"]):
+            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if num_cols:
+                target_col = None
+                for col in num_cols:
+                    if col.lower() in question.lower():
+                        target_col = col
+                        break
+                if not target_col:
+                    target_col = num_cols[0]
+                
+                try:
+                    fig = plot_hist(df, target_col)
+                    result["fig"] = fig
+                except Exception:
+                    pass
+        
+        # Se a pergunta menciona correlação, tentar gerar matriz
+        elif "correla" in question.lower():
+            try:
+                corr, fig = correlation_matrix(df)
+                if fig is not None:
+                    result["tables"]["correlation"] = corr
+                    result["fig"] = fig
+            except Exception:
+                pass
+        
+        return result
+        
+    except Exception as e:
+        # Fallback para o comportamento original em caso de erro
+        desc = summary_stats(df)
+        return {
+            "answer": f"Erro ao processar pergunta com IA: {str(e)}. Mostrando resumo estatístico.",
+            "tables": {"summary": desc},
+            "fig": None
+        }

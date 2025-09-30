@@ -10,7 +10,6 @@ st.title("EDA Agent (CSV genérico)")
 mem = Memory.load()
 
 uploaded = st.file_uploader("Carregue um CSV", type=["csv"])
-sample_note = st.text_area("Observações / Conclusões do Agente (opcional)", "")
 
 if uploaded is not None:
     df = load_csv(uploaded)
@@ -27,9 +26,18 @@ if uploaded is not None:
         if res.get("fig") is not None:
             st.pyplot(res["fig"])
 
+    sample_note = st.text_area("Observações / Conclusões do Operador (opcional)", "")
+
     if st.button("Salvar Conclusão", use_container_width=True):
-        add_conclusion(mem, sample_note)
-        st.success("Conclusão salva na memória.")
+        if sample_note.strip():  # Verificar se há texto para salvar
+            add_conclusion(mem, sample_note)
+            st.success("Conclusão salva na memória.")
+            # Recarregar a memória para mostrar as atualizações
+            mem = Memory.load()
+            # Limpar o campo de texto após salvar
+            st.rerun()
+        else:
+            st.warning("Por favor, digite uma conclusão antes de salvar.")
 
     st.subheader("Memória do Agente")
     st.write(mem.facts)
