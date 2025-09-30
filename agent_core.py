@@ -131,8 +131,110 @@ def kmeans_clusters(df: pd.DataFrame, k: int = 3) -> Tuple[Optional[pd.DataFrame
     result = pd.DataFrame({"PC1": xy[:,0], "PC2": xy[:,1], "cluster": labels}, index=num_df.index)
     return result, fig
 
-# Heuristic question router
+# Palavras‑chave e rotas mapeadas para intents padronizados
+# Cada intent possui: lista de palavras‑chave já suportadas e um token de injeção
+KEYWORD_ROUTES: Dict[str, Dict[str, Any]] = {
+    "types": {
+        "keywords": ["tipo", "tipos", "types", "colunas", "columns"],
+        "inject": "types",
+    },
+    "distribution": {
+        "keywords": ["distribuição", "histograma", "histogram", "distribution"],
+        "inject": "distribuição",
+    },
+    "correlation": {
+        "keywords": ["correla"],
+        "inject": "correla",
+    },
+    "outliers": {
+        "keywords": ["outlier", "atípico", "anomalia", "anomaly"],
+        "inject": "outlier",
+    },
+    "clusters": {
+        "keywords": ["cluster", "agrupamento"],
+        "inject": "cluster",
+    },
+    "summary": {
+        "keywords": ["média", "mediana", "variância", "desvio", "summary", "describe", "estatíst"],
+        "inject": "summary",
+    },
+    "temporal": {
+        "keywords": ["tempo", "temporal", "time trend"],
+        "inject": "tempo",
+    },
+}
+
+
+def llm_classify_and_rewrite(question: str, df: pd.DataFrame, mem: Memory) -> Tuple[Optional[str], str]:
+    """
+    Usa a OpenAI (gpt-3.5-turbo) para:
+    1) Classificar a intenção do usuário segundo intents conhecidas
+    2) Reescrever a pergunta, se necessário
+    Retorna (intent|None, pergunta_reescrita)
+    """
+    try:
+        load_dotenv()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None, question
+
+        client = openai.OpenAI(api_key=api_key)
+
+        allowed_intents = list(KEYWORD_ROUTES.keys())
+        memory_snippet = "\n".join(f"- {fact}" for fact in mem.facts[:10]) if mem and mem.facts else "(vazio)"
+
+        basic_info = basic_overview(df)
+        json_example = json.dumps({
+            "intent": "types|distribution|correlation|outliers|clusters|summary|temporal|none",
+            "rewritten_question": "...",
+        }, ensure_ascii=False)
+        prompt = (
+            "Você é um roteador de intenções.\n"
+            "Classifique a pergunta do usuário em UMA das intents pré-definidas ou 'none' se não corresponder.\n"
+            "Se necessário, reescreva a pergunta para ficar mais clara e objetiva.\n\n"
+            f"INTENTS PERMITIDAS: {allowed_intents}\n"
+            f"FORMATO DE SAÍDA STRICT JSON (sem texto extra): {json_example}\n\n"
+            f"FATOS DA MEMÓRIA (contexto):\n{memory_snippet}\n\n"
+            f"COLUNAS DO DATASET: {', '.join(basic_info['columns'][:50])}\n\n"
+            f"PERGUNTA ORIGINAL: {question}"
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você responde apenas JSON válido quando solicitado."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=300,
+        )
+        content = resp.choices[0].message.content or "{}"
+        data = json.loads(content)
+        intent = data.get("intent")
+        rewritten = data.get("rewritten_question") or question
+        if intent not in KEYWORD_ROUTES and intent != "none":
+            # Intent desconhecida → tratar como none
+            intent = None
+        if intent == "none":
+            intent = None
+        return intent, rewritten
+    except Exception:
+        # Em caso de qualquer erro, mantém pergunta original e sem intent
+        return None, question
+
+
+# Heuristic question router (com roteamento por LLM antes das heurísticas)
 def answer_question(question: str, df: pd.DataFrame, mem: Memory) -> Dict[str, Any]:
+    # Primeiro tenta classificar/reescrever via LLM
+    intent, rewritten_question = llm_classify_and_rewrite(question, df, mem)
+    if rewritten_question:
+        question = rewritten_question
+
+    # Se houver uma intent reconhecida, injeta um token correspondente
+    if intent and intent in KEYWORD_ROUTES:
+        inject_token = KEYWORD_ROUTES[intent]["inject"]
+        question = f"{question} {inject_token}"
+
     q = question.lower()
     result: Dict[str, Any] = {"answer": "", "fig": None, "tables": {}}
 
